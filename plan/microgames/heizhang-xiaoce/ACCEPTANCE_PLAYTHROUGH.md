@@ -1,7 +1,7 @@
 # ACCEPTANCE_PLAYTHROUGH: 黑账小册
 
 ## Scripted Playthrough
-1. 开局显示 resource / pressure / risk / relation / round
+1. 开局显示 evidence_clarity / stash_risk / encoding_difficulty / search_pressure / round
 2. 玩家执行一次核心操作：选择事件 -> 编码记录 -> 藏匿 -> 经历搜查 -> 最终解码证据
 3. 系统必须反馈一个资源或身体压力变化
 4. 系统必须反馈一个关系或风险变化

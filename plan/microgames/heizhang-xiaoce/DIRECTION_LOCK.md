@@ -18,10 +18,10 @@
 - 不把小游戏扩成长期经营或开放世界
 
 ## Required State
-- resource
-- pressure
-- risk
-- relation
+- evidence_clarity
+- stash_risk
+- encoding_difficulty
+- search_pressure
 - round
 
 ## Success
