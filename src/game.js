@@ -1,33 +1,51 @@
+import {
+  EVENT_FRAGMENTS,
+  ENCODING_METHODS,
+  STASH_POINTS,
+  computeEncodingResult,
+  computeSearchResult,
+  computeDecodeResult,
+  selectSearchByRound,
+} from './content/content-pool.js';
+
 const PHASES = ['selectEvent', 'encodeRecord', 'hideEvidence', 'underSearch', 'decodeEvidence'];
 
-const EVENT_POOL = [
-  { id: 'bribe', name: '贿赂记录', description: '一笔不明资金流入，需要编码记录。', baseRisk: 2 },
-  { id: 'kickback', name: '回扣条目', description: '供应商回扣，证据清晰但危险。', baseRisk: 3 },
-  { id: 'theft', name: '挪用痕迹', description: '公款挪用的线索，需要小心处理。', baseRisk: 2 },
-];
+const MAX_ROUNDS = 5;
+const RISK_LIMIT = 15;
+const PRESSURE_LIMIT = 12;
+const CLARITY_SUCCESS = 6;
 
 export class Game {
   constructor() {
-    this.state = { resource: 10, pressure: 0, risk: 0, relation: 5, round: 1 };
+    this.state = {
+      evidence_clarity: 0,
+      stash_risk: 0,
+      encoding_difficulty: 0,
+      search_pressure: 0,
+      round: 1,
+    };
     this.currentPhase = 'selectEvent';
-    this.currentEvent = null;
-    this.encodedRecord = null;
-    this.hiddenQuality = 0;
     this.phaseIndex = 0;
+    this.currentEvent = null;
+    this.currentEncoding = null;
+    this.currentStashPoint = null;
+    this.currentDetailLevel = 1;
+    this.lastSearchResult = null;
+    this.lastDecodeResult = null;
   }
 
   phaseDescription() {
     switch (this.currentPhase) {
       case 'selectEvent':
-        return '选择一个需要记录的事件。不同事件风险不同。';
+        return '选择一个需要记录的事件碎片。不同事件的证据价值和可疑度不同。';
       case 'encodeRecord':
         return `为「${this.currentEvent.name}」选择编码方式。编码越复杂越安全，但解码也越难。`;
       case 'hideEvidence':
-        return '选择藏匿方式。藏得越好越安全，但可能影响后续取用。';
+        return '选择藏匿位置。藏得越隐蔽越安全，但取用越困难。';
       case 'underSearch':
         return '搜查进行中！你的藏匿质量将接受考验。';
       case 'decodeEvidence':
-        return '最终阶段：解码证据。编码越复杂，解码消耗的资源越多。';
+        return '最终阶段：解码证据。编码越复杂，需要越高的清晰度才能成功。';
       default:
         return '';
     }
@@ -36,27 +54,28 @@ export class Game {
   availableActions() {
     switch (this.currentPhase) {
       case 'selectEvent':
-        return EVENT_POOL.map((e) => ({ id: 'select', target: e.id, label: e.name }));
+        return EVENT_FRAGMENTS.map((e) => ({
+          id: 'selectEvent',
+          target: e.id,
+          label: e.name,
+          event: e,
+        }));
       case 'encodeRecord':
-        return [
-          { id: 'encode_simple', label: '简单编码 (低安全/易解码)', complexity: 1 },
-          { id: 'encode_medium', label: '中等编码 (平衡)', complexity: 2 },
-          { id: 'encode_complex', label: '复杂编码 (高安全/难解码)', complexity: 3 },
-        ];
+        return ENCODING_METHODS.map((m) => ({
+          id: 'encode',
+          label: `${m.name} (复杂度${m.complexity}/安全${m.security}/清晰度保留${Math.round(m.clarity_preservation * 100)}%)`,
+          encoding: m,
+        }));
       case 'hideEvidence':
-        return [
-          { id: 'hide_careful', label: '仔细藏匿 (消耗资源)', quality: 3 },
-          { id: 'hide_quick', label: '快速藏匿 (节省资源)', quality: 1 },
-        ];
+        return STASH_POINTS.map((s) => ({
+          id: 'hide',
+          label: `${s.name} (风险${s.stash_risk}/取用${s.accessibility}/防御${s.search_resistance})`,
+          stashPoint: s,
+        }));
       case 'underSearch':
-        return [
-          { id: 'stay_calm', label: '保持冷静 (低风险)' },
-          { id: 'cooperate', label: '有限配合 (降低压力)' },
-        ];
+        return [{ id: 'endure', label: '硬抗搜查' }];
       case 'decodeEvidence':
-        return [
-          { id: 'decode', label: '开始解码' },
-        ];
+        return [{ id: 'decode', label: '开始解码' }];
       default:
         return [];
     }
@@ -80,54 +99,89 @@ export class Game {
         this._doDecode(action);
         break;
     }
-    this._applyPressure();
   }
 
+  // --- Phase handlers ---
+  // Each handler must change at least one "progress" state AND one "risk" state
+  // per MECHANIC_SPEC State Coupling requirement.
+
   _doSelectEvent(action) {
-    this.currentEvent = EVENT_POOL.find((e) => e.id === action.target);
-    this.state.risk += this.currentEvent.baseRisk;
+    this.currentEvent = action.event || EVENT_FRAGMENTS.find((e) => e.id === action.target);
+    // Progress: reset encoding_difficulty for new round
+    // Risk: stash_risk increases by event base suspicion
+    this.state.encoding_difficulty = 0;
+    this.state.stash_risk += this.currentEvent.base_suspicion;
     this._advancePhase();
   }
 
   _doEncode(action) {
-    this.encodedRecord = { complexity: action.complexity };
-    this.state.resource -= action.complexity;
+    this.currentEncoding = action.encoding;
+    this.currentDetailLevel = action.detailLevel ?? 1;
+    const result = computeEncodingResult(
+      this.currentEvent, this.currentEncoding, this.currentDetailLevel,
+    );
+    // Progress: evidence_clarity accumulates, encoding_difficulty set
+    // Risk: stash_risk changes based on encoding security vs suspicion
+    this.state.evidence_clarity += result.evidence_clarity;
+    this.state.stash_risk += result.stash_risk;
+    this.state.encoding_difficulty = result.encoding_difficulty;
     this._advancePhase();
   }
 
   _doHide(action) {
-    this.hiddenQuality = action.quality;
-    if (action.quality >= 3) this.state.resource -= 2;
+    this.currentStashPoint = action.stashPoint;
+    // Risk: stash_risk increases by stash point risk value
+    // Progress: evidence_clarity penalized for low accessibility (harder to retrieve later)
+    this.state.stash_risk += this.currentStashPoint.stash_risk;
+    const clarityPenalty = Math.max(0, 3 - this.currentStashPoint.accessibility);
+    this.state.evidence_clarity = Math.max(0, this.state.evidence_clarity - clarityPenalty);
     this._advancePhase();
   }
 
-  _doSearch(action) {
-    const searchPower = Math.floor(Math.random() * 4) + 1 + this.state.round;
-    const survived = this.hiddenQuality + Math.floor(Math.random() * 2) >= searchPower;
-    if (!survived) {
-      this.state.risk += 3;
-      this.state.pressure += 2;
-    } else {
-      this.state.relation += 1;
+  _doSearch() {
+    const scenario = selectSearchByRound(this.state.round);
+    const result = computeSearchResult(
+      this.currentStashPoint, this.currentEncoding, scenario, this.state.round,
+    );
+    this.lastSearchResult = result;
+    // Survival: search_pressure always increases
+    // Risk: stash_risk increases if detected
+    this.state.search_pressure += result.search_pressure;
+    if (result.detected) {
+      this.state.stash_risk += result.stash_risk_change;
     }
-    if (action.id === 'cooperate') this.state.pressure = Math.max(0, this.state.pressure - 1);
     this._advancePhase();
   }
 
   _doDecode() {
-    const cost = this.encodedRecord.complexity * 2;
-    this.state.resource -= cost;
-    if (this.state.resource < 0) {
-      this.state.risk += 5;
+    const result = computeDecodeResult(
+      this.currentEncoding, this.state.evidence_clarity, this.currentStashPoint,
+    );
+    this.lastDecodeResult = result;
+    // Progress: evidence_clarity boosted on success, taxed by decode cost
+    // Survival: encoding_difficulty determines decode cost pressure
+    const decodeCost = result.decode_cost;
+    this.state.evidence_clarity = Math.max(0, this.state.evidence_clarity - decodeCost);
+    if (result.success) {
+      this.state.evidence_clarity += 2;
     }
+    // Search pressure eases slightly between rounds
+    this.state.search_pressure = Math.max(0, this.state.search_pressure - 1);
     this.state.round += 1;
     if (!this.isGameOver()) {
-      this.currentPhase = 'selectEvent';
-      this.phaseIndex = 0;
-      this.currentEvent = null;
-      this.encodedRecord = null;
-      this.hiddenQuality = 0;
+      this._resetForNextRound();
     }
+  }
+
+  // --- Helpers ---
+
+  _resetForNextRound() {
+    this.currentPhase = 'selectEvent';
+    this.phaseIndex = 0;
+    this.currentEvent = null;
+    this.currentEncoding = null;
+    this.currentStashPoint = null;
+    this.currentDetailLevel = 1;
   }
 
   _advancePhase() {
@@ -137,31 +191,37 @@ export class Game {
     }
   }
 
-  _applyPressure() {
-    if (this.state.risk > 8) this.state.pressure += 1;
-  }
+  // --- Settlement ---
 
   isGameOver() {
-    if (this.state.resource <= 0 && this.currentPhase === 'decodeEvidence') return true;
-    if (this.state.risk >= 15) return true;
-    if (this.state.pressure >= 10) return true;
-    if (this.state.round > 5) return true;
+    if (this.state.stash_risk >= RISK_LIMIT) return true;
+    if (this.state.search_pressure >= PRESSURE_LIMIT) return true;
+    if (this.state.round > MAX_ROUNDS) return true;
     return false;
   }
 
   getEndResult() {
-    if (this.state.risk >= 15) {
-      return { title: '被查出', description: `风险值爆表(${this.state.risk})，黑账暴露，你被淘汰。` };
+    if (this.state.stash_risk >= RISK_LIMIT) {
+      return {
+        title: '黑账暴露',
+        description: `藏匿风险爆表(${this.state.stash_risk})，暗号小册被搜出，编码被破解。`,
+      };
     }
-    if (this.state.pressure >= 10) {
-      return { title: '压力崩溃', description: `压力值过高(${this.state.pressure})，你无法继续。` };
+    if (this.state.search_pressure >= PRESSURE_LIMIT) {
+      return {
+        title: '压力崩溃',
+        description: `搜查压力过高(${this.state.search_pressure})，你无法继续。`,
+      };
     }
-    if (this.state.resource <= 0) {
-      return { title: '资源耗尽', description: '没有足够资源完成解码，证据链断裂。' };
+    if (this.state.evidence_clarity >= CLARITY_SUCCESS) {
+      return {
+        title: '证据链完整',
+        description: `你成功保存了高清晰度证据(清晰度${this.state.evidence_clarity})，黑账记录完整可读。`,
+      };
     }
     return {
-      title: '存活结算',
-      description: `你撑过了 ${this.state.round - 1} 轮。最终风险:${this.state.risk} 压力:${this.state.pressure} 关系:${this.state.relation}`,
+      title: '存活',
+      description: `你撑过了${this.state.round - 1}轮。清晰度:${this.state.evidence_clarity} 风险:${this.state.stash_risk} 搜查压力:${this.state.search_pressure}`,
     };
   }
 }
